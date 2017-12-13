@@ -1,5 +1,6 @@
 package com.tinmegali.security;
 
+import com.tinmegali.models.Account;
 import com.tinmegali.services.AccountService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -7,13 +8,17 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.oauth2.common.DefaultOAuth2AccessToken;
 import org.springframework.security.oauth2.config.annotation.configurers.ClientDetailsServiceConfigurer;
 import org.springframework.security.oauth2.config.annotation.web.configuration.AuthorizationServerConfigurerAdapter;
 import org.springframework.security.oauth2.config.annotation.web.configuration.EnableAuthorizationServer;
 import org.springframework.security.oauth2.config.annotation.web.configurers.AuthorizationServerEndpointsConfigurer;
 import org.springframework.security.oauth2.config.annotation.web.configurers.AuthorizationServerSecurityConfigurer;
 import org.springframework.security.oauth2.provider.token.DefaultTokenServices;
+import org.springframework.security.oauth2.provider.token.TokenEnhancer;
+import org.springframework.security.oauth2.provider.token.TokenEnhancerChain;
 import org.springframework.security.oauth2.provider.token.TokenStore;
 import org.springframework.security.oauth2.provider.token.store.JwtAccessTokenConverter;
 import org.springframework.security.oauth2.provider.token.store.JwtTokenStore;
@@ -24,6 +29,9 @@ import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.UnrecoverableKeyException;
 import java.security.cert.CertificateException;
+import java.util.*;
+
+import static java.util.stream.Collectors.toList;
 
 @Configuration
 @EnableAuthorizationServer
@@ -37,6 +45,10 @@ public class AuthorizationServerConfig extends AuthorizationServerConfigurerAdap
 
     @Value("${refresh_token.validity_period}")
     private int refreshTokenValiditySeconds;
+
+    /** Namespace to use for user_name and authorities so that we're OIDC conformant */
+    @Value("${oidc_namespace:http://name.space/}")
+    private String namespace;
 
     @Autowired
     private AuthenticationManager authenticationManager;
@@ -120,11 +132,35 @@ public class AuthorizationServerConfig extends AuthorizationServerConfigurerAdap
     @Bean
     @Primary
     public DefaultTokenServices tokenServices() {
+        TokenEnhancerChain enhancersChain = new TokenEnhancerChain();
+
+        List<TokenEnhancer> enhancersList = new ArrayList<>(2);
+        enhancersList.add(applyNamespaceTokenEnhancer());
+        enhancersList.add(accessTokenConverter());
+        enhancersChain.setTokenEnhancers(enhancersList);
+
         DefaultTokenServices defaultTokenServices = new DefaultTokenServices();
         defaultTokenServices.setTokenStore(tokenStore());
         defaultTokenServices.setSupportRefreshToken(true);
-        defaultTokenServices.setTokenEnhancer(accessTokenConverter());
+        defaultTokenServices.setTokenEnhancer(enhancersChain);
         return defaultTokenServices;
     }
 
+    private TokenEnhancer applyNamespaceTokenEnhancer() {
+        return (accessToken, authentication) -> {
+                List<String> authorities = authentication.getAuthorities()
+                        .stream()
+                        .map(GrantedAuthority::getAuthority)
+                        .collect(toList());
+
+                Map<String, Object> newTokenInfo = new LinkedHashMap<>(accessToken.getAdditionalInformation());
+                newTokenInfo.put(namespace + "user_name", authentication.getName());
+                newTokenInfo.put(namespace + "authorities", authorities);
+                Account account = (Account) authentication.getUserAuthentication().getPrincipal();
+                newTokenInfo.put(namespace + "givenName", account.getFirstName());
+                DefaultOAuth2AccessToken result = new DefaultOAuth2AccessToken(accessToken);
+                result.setAdditionalInformation(newTokenInfo);
+                return result;
+            };
+    }
 }
